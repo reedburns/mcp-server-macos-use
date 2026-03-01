@@ -1,0 +1,346 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build (${{ matrix.arch }})
+    runs-on: macos-14
+    strategy:
+      matrix:
+        arch: [arm64, x86_64]
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Select Xcode
+      run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+    - name: Detect codesigning configuration
+      run: |
+        if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$HAS_CERT" ]; then
+          echo "CODESIGN_ENABLED=true" >> $GITHUB_ENV
+        else
+          echo "CODESIGN_ENABLED=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$HAS_NOTARIZE" ]; then
+          echo "NOTARIZE_ENABLED=true" >> $GITHUB_ENV
+        else
+          echo "NOTARIZE_ENABLED=false" >> $GITHUB_ENV
+        fi
+      env:
+        HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        HAS_NOTARIZE: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+
+    - name: Setup codesigning keychain
+      if: env.CODESIGN_ENABLED == 'true'
+      env:
+        CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+      run: |
+        KEYCHAIN_NAME="build.keychain-db"
+        echo "KEYCHAIN_NAME=$KEYCHAIN_NAME" >> $GITHUB_ENV
+
+        echo "$CERTIFICATE_P12" | base64 --decode > certificate.p12
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+
+        security import certificate.p12 \
+          -k "$KEYCHAIN_NAME" \
+          -P "$CERTIFICATE_PASSWORD" \
+          -T /usr/bin/codesign \
+          -T /usr/bin/security
+
+        security set-key-partition-list -S apple-tool:,apple:,codesign: \
+          -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+
+        security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | tr -d '"')
+
+        rm certificate.p12
+
+        echo "CODESIGN_IDENTITY=${{ secrets.MACOS_SIGNING_IDENTITY }}" >> $GITHUB_ENV
+
+    - name: Resolve Swift packages
+      run: swift package resolve
+
+    - name: Build release (${{ matrix.arch }})
+      run: |
+        swift build -c release --arch ${{ matrix.arch }}
+
+    - name: Sign binary
+      run: |
+        BINARY=".build/release/mcp-server-macos-use"
+        if [ "$CODESIGN_ENABLED" = "true" ]; then
+          echo "=== Signing with Developer ID ==="
+          codesign --force --options runtime \
+            -s "$CODESIGN_IDENTITY" "$BINARY"
+        else
+          echo "=== Ad-hoc signing ==="
+          codesign --force -s - "$BINARY"
+        fi
+        echo "=== Codesign verify ==="
+        codesign -dvvv "$BINARY" 2>&1
+
+    - name: Create tarball
+      run: |
+        VERSION="${GITHUB_REF_NAME:-dev}"
+        VERSION="${VERSION#v}"
+        TARBALL="mcp-server-macos-use-${VERSION}-${{ matrix.arch }}.tar.gz"
+
+        mkdir -p dist
+        cp .build/release/mcp-server-macos-use dist/
+        cp LICENSE dist/ 2>/dev/null || true
+        cp README.md dist/ 2>/dev/null || true
+
+        tar -czf "$TARBALL" -C dist .
+
+        echo "TARBALL=$TARBALL" >> $GITHUB_ENV
+        echo "=== Tarball ==="
+        ls -lh "$TARBALL"
+
+    - name: Notarize binary
+      if: env.CODESIGN_ENABLED == 'true' && env.NOTARIZE_ENABLED == 'true'
+      env:
+        APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+        APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+        TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+      run: |
+        # Notarization requires a ZIP for CLI tools
+        BINARY=".build/release/mcp-server-macos-use"
+        ZIP_FOR_NOTARY="mcp-server-macos-use-notarize.zip"
+        ditto -c -k --keepParent "$BINARY" "$ZIP_FOR_NOTARY"
+
+        echo "=== Submitting for notarization ==="
+        xcrun notarytool submit "$ZIP_FOR_NOTARY" \
+          --apple-id "$APPLE_ID" \
+          --password "$APPLE_PASSWORD" \
+          --team-id "$TEAM_ID" \
+          --wait
+
+        rm "$ZIP_FOR_NOTARY"
+
+    - name: Cleanup keychain
+      if: always() && env.CODESIGN_ENABLED == 'true'
+      run: security delete-keychain "$KEYCHAIN_NAME" 2>/dev/null || true
+
+    - name: Upload artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mcp-server-macos-use-${{ matrix.arch }}
+        path: "*.tar.gz"
+        if-no-files-found: error
+
+  build-universal:
+    name: Build (Universal)
+    needs: build
+    runs-on: macos-14
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+
+    - name: Select Xcode
+      run: sudo xcode-select -s /Applications/Xcode_15.4.app/Contents/Developer || sudo xcode-select -s /Applications/Xcode.app/Contents/Developer
+
+    - name: Detect codesigning configuration
+      run: |
+        if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$HAS_CERT" ]; then
+          echo "CODESIGN_ENABLED=true" >> $GITHUB_ENV
+        else
+          echo "CODESIGN_ENABLED=false" >> $GITHUB_ENV
+        fi
+        if [ "${{ github.event_name }}" != "pull_request" ] && [ -n "$HAS_NOTARIZE" ]; then
+          echo "NOTARIZE_ENABLED=true" >> $GITHUB_ENV
+        else
+          echo "NOTARIZE_ENABLED=false" >> $GITHUB_ENV
+        fi
+      env:
+        HAS_CERT: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        HAS_NOTARIZE: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+
+    - name: Setup codesigning keychain
+      if: env.CODESIGN_ENABLED == 'true'
+      env:
+        CERTIFICATE_P12: ${{ secrets.MACOS_CERTIFICATE_P12 }}
+        CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.MACOS_KEYCHAIN_PASSWORD }}
+      run: |
+        KEYCHAIN_NAME="build.keychain-db"
+        echo "KEYCHAIN_NAME=$KEYCHAIN_NAME" >> $GITHUB_ENV
+        echo "$CERTIFICATE_P12" | base64 --decode > certificate.p12
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_NAME"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+        security import certificate.p12 \
+          -k "$KEYCHAIN_NAME" \
+          -P "$CERTIFICATE_PASSWORD" \
+          -T /usr/bin/codesign \
+          -T /usr/bin/security
+        security set-key-partition-list -S apple-tool:,apple:,codesign: \
+          -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_NAME"
+        security list-keychains -d user -s "$KEYCHAIN_NAME" $(security list-keychains -d user | tr -d '"')
+        rm certificate.p12
+        echo "CODESIGN_IDENTITY=${{ secrets.MACOS_SIGNING_IDENTITY }}" >> $GITHUB_ENV
+
+    - name: Build both architectures
+      run: |
+        swift build -c release --arch arm64
+        cp .build/release/mcp-server-macos-use .build/release/mcp-server-macos-use-arm64
+
+        swift build -c release --arch x86_64
+        cp .build/release/mcp-server-macos-use .build/release/mcp-server-macos-use-x86_64
+
+    - name: Create universal binary
+      run: |
+        lipo -create \
+          .build/release/mcp-server-macos-use-arm64 \
+          .build/release/mcp-server-macos-use-x86_64 \
+          -output .build/release/mcp-server-macos-use-universal
+
+        echo "=== Universal binary ==="
+        file .build/release/mcp-server-macos-use-universal
+        lipo -info .build/release/mcp-server-macos-use-universal
+
+    - name: Sign universal binary
+      run: |
+        BINARY=".build/release/mcp-server-macos-use-universal"
+        if [ "$CODESIGN_ENABLED" = "true" ]; then
+          codesign --force --options runtime -s "$CODESIGN_IDENTITY" "$BINARY"
+        else
+          codesign --force -s - "$BINARY"
+        fi
+        codesign -dvvv "$BINARY" 2>&1
+
+    - name: Create tarball
+      run: |
+        VERSION="${GITHUB_REF_NAME:-dev}"
+        VERSION="${VERSION#v}"
+        TARBALL="mcp-server-macos-use-${VERSION}-universal.tar.gz"
+
+        mkdir -p dist
+        cp .build/release/mcp-server-macos-use-universal dist/mcp-server-macos-use
+        cp LICENSE dist/ 2>/dev/null || true
+        cp README.md dist/ 2>/dev/null || true
+
+        tar -czf "$TARBALL" -C dist .
+        echo "TARBALL=$TARBALL" >> $GITHUB_ENV
+
+    - name: Notarize universal binary
+      if: env.CODESIGN_ENABLED == 'true' && env.NOTARIZE_ENABLED == 'true'
+      env:
+        APPLE_ID: ${{ secrets.MACOS_NOTARIZATION_APPLE_ID }}
+        APPLE_PASSWORD: ${{ secrets.MACOS_NOTARIZATION_PASSWORD }}
+        TEAM_ID: ${{ secrets.MACOS_NOTARIZATION_TEAM_ID }}
+      run: |
+        BINARY=".build/release/mcp-server-macos-use-universal"
+        ZIP_FOR_NOTARY="mcp-server-macos-use-notarize.zip"
+        ditto -c -k --keepParent "$BINARY" "$ZIP_FOR_NOTARY"
+        xcrun notarytool submit "$ZIP_FOR_NOTARY" \
+          --apple-id "$APPLE_ID" --password "$APPLE_PASSWORD" \
+          --team-id "$TEAM_ID" --wait
+        rm "$ZIP_FOR_NOTARY"
+
+    - name: Cleanup keychain
+      if: always() && env.CODESIGN_ENABLED == 'true'
+      run: security delete-keychain "$KEYCHAIN_NAME" 2>/dev/null || true
+
+    - name: Upload universal artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: mcp-server-macos-use-universal
+        path: "*.tar.gz"
+        if-no-files-found: error
+
+  release:
+    name: Create Release
+    needs: [build, build-universal]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+    - name: Download all artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: release/
+        merge-multiple: false
+
+    - name: Flatten release directory
+      run: |
+        mkdir -p flat_release
+        find release -type f -name '*.tar.gz' -exec cp {} flat_release/ \;
+        echo "=== Release assets ==="
+        ls -la flat_release/
+
+    - name: Generate checksums
+      run: |
+        cd flat_release
+        shasum -a 256 *.tar.gz > SHA256SUMS.txt
+        cat SHA256SUMS.txt
+
+    - name: Create GitHub Release
+      uses: softprops/action-gh-release@v2
+      with:
+        name: "mcp-server-macos-use ${{ github.ref_name }}"
+        body: |
+          ## mcp-server-macos-use ${{ github.ref_name }}
+
+          MCP server for controlling macOS via Accessibility API.
+
+          ### Downloads
+
+          | Architecture | File |
+          |---|---|
+          | **Apple Silicon** (M1/M2/M3/M4) | `mcp-server-macos-use-*-arm64.tar.gz` |
+          | **Intel** (x86_64) | `mcp-server-macos-use-*-x86_64.tar.gz` |
+          | **Universal** (both) | `mcp-server-macos-use-*-universal.tar.gz` |
+
+          ### Installation
+
+          **Via Homebrew (recommended):**
+          ```bash
+          brew tap reg2005/mcp-server-macos-use
+          brew install mcp-server-macos-use
+          ```
+
+          **Manual:**
+          ```bash
+          tar xzf mcp-server-macos-use-*-universal.tar.gz
+          sudo mv mcp-server-macos-use /usr/local/bin/
+          ```
+
+          ### MCP Configuration
+
+          Add to your Claude Desktop / Cursor / OpenClaw config:
+          ```json
+          {
+            "mcpServers": {
+              "macos-use": {
+                "command": "mcp-server-macos-use"
+              }
+            }
+          }
+          ```
+
+          ### Requirements
+          - macOS 13.0 (Ventura) or later
+          - Accessibility permission (System Settings → Privacy & Security → Accessibility)
+
+          ### Checksums
+          See `SHA256SUMS.txt` in release assets.
+        draft: false
+        prerelease: false
+        files: |
+          flat_release/*.tar.gz
+          flat_release/SHA256SUMS.txt
