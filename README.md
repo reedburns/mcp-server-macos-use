@@ -1,96 +1,122 @@
 # mcp-server-macos-use
 
-Model Context Protocol (MCP) server in Swift. It allows controlling macOS applications by leveraging the accessibility APIs, primarily through the `MacosUseSDK`.
+Pre-built binaries and Homebrew formula for [mediar-ai/mcp-server-macos-use](https://github.com/mediar-ai/mcp-server-macos-use) — an MCP server that lets AI agents control macOS via the Accessibility API.
 
-You can use it in Claude Desktop or other compatible MCP-client.
+Open apps, click buttons, type text, press keys, scroll, and read the full UI tree — all through the standard [Model Context Protocol](https://modelcontextprotocol.io/).
 
-The server listens for MCP commands over standard input/output (`stdio`) and exposes several tools to interact with applications.
+## Install
 
-
-https://github.com/user-attachments/assets/b43622a3-3d20-4026-b02f-e9add06afe2b
-
-## Available Tools
-
-The server exposes the following tools via the `CallTool` MCP method:
-
-1.  **`macos-use_open_application_and_traverse`**
-    *   **Description:** Opens or activates a specified application and then traverses its accessibility tree.
-    *   **Parameters:**
-        *   `identifier` (String, Required): The application's name, bundle ID, or file path.
-
-2.  **`macos-use_click_and_traverse`**
-    *   **Description:** Simulates a mouse click at specific coordinates within the window of the target application (identified by PID) and then traverses its accessibility tree.
-    *   **Parameters:**
-        *   `pid` (Number, Required): The Process ID (PID) of the target application.
-        *   `x` (Number, Required): The X-coordinate for the click (relative to the window/screen, depending on SDK behavior).
-        *   `y` (Number, Required): The Y-coordinate for the click.
-
-3.  **`macos-use_type_and_traverse`**
-    *   **Description:** Simulates typing text into the target application (identified by PID) and then traverses its accessibility tree.
-    *   **Parameters:**
-        *   `pid` (Number, Required): The Process ID (PID) of the target application.
-        *   `text` (String, Required): The text to be typed.
-
-4.  **`macos-use_press_key_and_traverse`**
-    *   **Description:** Simulates pressing a specific keyboard key (e.g., 'Enter', 'Tab', 'a', 'B') with optional modifier keys held down, targeting the application specified by PID, and then traverses its accessibility tree.
-    *   **Parameters:**
-        *   `pid` (Number, Required): The Process ID (PID) of the target application.
-        *   `keyName` (String, Required): The name of the key (e.g., `Return`, `Escape`, `ArrowUp`, `Delete`, `a`, `B`). Case-sensitive for letters if no modifiers are active.
-        *   `modifierFlags` (Array<String>, Optional): An array of modifier keys to hold during the press. Valid values: `CapsLock` (or `Caps`), `Shift`, `Control` (or `Ctrl`), `Option` (or `Opt`, `Alt`), `Command` (or `Cmd`), `Function` (or `Fn`), `NumericPad` (or `Numpad`), `Help`.
-
-5.  **`macos-use_refresh_traversal`**
-    *   **Description:** Only performs the accessibility tree traversal for the specified application (identified by PID). Useful for getting the current UI state without performing an action.
-    *   **Parameters:**
-        *   `pid` (Number, Required): The Process ID (PID) of the application to traverse.
-
-**Common Optional Parameters (for `CallTool`)**
-
-These can potentially be passed in the `arguments` object for any tool call to override default `MacosUseSDK` behavior (refer to `ActionOptions` in the code):
-
-*   `traverseBefore` (Boolean, Optional): Traverse accessibility tree before the primary action.
-*   `traverseAfter` (Boolean, Optional): Traverse accessibility tree after the primary action (usually defaults to true).
-*   `showDiff` (Boolean, Optional): Include a diff between traversals (if applicable).
-*   `onlyVisibleElements` (Boolean, Optional): Limit traversal to visible elements.
-*   `showAnimation` (Boolean, Optional): Show visual feedback animation for actions.
-*   `animationDuration` (Number, Optional): Duration of the feedback animation.
-*   `delayAfterAction` (Number, Optional): Add a delay after performing the action.
-
-## Dependencies
-
-*   `MacosUseSDK` (Assumed local or external Swift package providing macOS control functionality)
-
-## Building and Running
+### Homebrew (recommended)
 
 ```bash
-# Example build command (adjust as needed, use 'debug' for development)
-swift build -c debug # Or 'release' for production
-
-# Running the server (it communicates via stdin/stdout)
-./.build/debug/mcp-server-macos-use
+brew tap reedburns/mcp-server-macos-use
+brew install mcp-server-macos-use
 ```
 
-**Integrating with Clients (Example: Claude Desktop)**
+### Manual
 
-Once built, you need to tell your client application where to find the server executable. For example, to configure Claude Desktop, you might add the following to its configuration:
+Download from [Releases](https://github.com/reedburns/mcp-server-macos-use/releases):
+
+```bash
+tar xzf mcp-server-macos-use-0.1.0-universal.tar.gz
+sudo mv mcp-server-macos-use /usr/local/bin/
+```
+
+### Build from source
+
+```bash
+git clone https://github.com/reedburns/mcp-server-macos-use.git
+cd mcp-server-macos-use
+swift build -c release
+# Binary: .build/release/mcp-server-macos-use
+```
+
+## Setup
+
+### 1. Grant Accessibility permission
+
+**System Settings → Privacy & Security → Accessibility** → add `mcp-server-macos-use`
+
+### 2. Configure your MCP client
+
+<details>
+<summary><b>Claude Desktop / Cursor</b></summary>
+
+Add to your MCP config (`claude_desktop_config.json` or Cursor settings):
 
 ```json
 {
-    "mcpServers": {
-        "mcp-server-macos-use": {
-            "command": "/path/to/your/project/mcp-server-macos-use/.build/debug/mcp-server-macos-use"
-        }
+  "mcpServers": {
+    "macos-use": {
+      "command": "mcp-server-macos-use"
     }
+  }
 }
 ```
+</details>
 
-*Replace `/path/to/your/project/` with the actual absolute path to your `mcp-server-macos-use` directory.*
+<details>
+<summary><b>OpenClaw (via mcporter)</b></summary>
 
-## Help
+```bash
+mcporter config add macos-use --transport stdio --command $(which mcp-server-macos-use)
+mcporter list macos-use --schema
+```
+</details>
 
-Reach out to matt@mediar.ai
-Discord: m13v_
+<details>
+<summary><b>OpenClaw Skill (ClawHub)</b></summary>
 
+```bash
+clawhub install mac-compute-use
+```
 
-## Plans
+Or visit: [clawhub.ai/skills/mac-compute-use](https://clawhub.ai/skills/mac-compute-use)
+</details>
 
-Happy to tailor the server for your needs, feel free to open an issue or reach out
+## Tools
+
+| Tool | Description |
+|---|---|
+| `open_application_and_traverse` | Open/activate an app and get its accessibility tree |
+| `click_and_traverse` | Click at coordinates and get updated UI state |
+| `type_and_traverse` | Type text into the focused app |
+| `press_key_and_traverse` | Press a key with optional modifiers (Cmd, Shift, etc.) |
+| `scroll_and_traverse` | Scroll within an app window |
+| `refresh_traversal` | Get current UI state without performing any action |
+
+## Usage examples
+
+```bash
+# Open an app
+mcporter call macos-use.macos-use_open_application_and_traverse identifier="Google Chrome"
+
+# Click a button (coordinates from the UI tree)
+mcporter call macos-use.macos-use_click_and_traverse pid=408 x=701 y=73 width=102 height=41
+
+# Type text
+mcporter call macos-use.macos-use_type_and_traverse pid=408 text="Hello world"
+
+# Press Cmd+A
+mcporter call macos-use.macos-use_press_key_and_traverse pid=408 keyName=a modifierFlags='["Command"]'
+
+# Scroll down
+mcporter call macos-use.macos-use_scroll_and_traverse pid=408 x=500 y=400 deltaY=3
+```
+
+## Requirements
+
+- macOS 13.0+ (Ventura)
+- Accessibility permission
+
+## Credits
+
+This is a fork of [mediar-ai/mcp-server-macos-use](https://github.com/mediar-ai/mcp-server-macos-use) by [Matt](https://github.com/m13v) and the [Mediar AI](https://github.com/mediar-ai) team. All the hard work on the Swift MCP server and the [MacosUseSDK](https://github.com/mediar-ai/MacosUseSDK) is theirs — we just added pre-built binaries, a Homebrew formula, and a CI pipeline so anyone can install it in seconds.
+
+Thank you for building this in the open! 🙏
+
+For the original documentation, see [README_OLD.md](README_OLD.md).
+
+## License
+
+[MIT](LICENSE) — same as the original project.
