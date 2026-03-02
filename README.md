@@ -74,6 +74,34 @@ clawhub install mac-compute-use
 Or visit: [clawhub.ai/skills/mac-compute-use](https://clawhub.ai/skills/mac-compute-use)
 </details>
 
+<details>
+<summary><b>Crush / OpenCode</b></summary>
+
+Add to your Crush config (`.crush.json`, `crush.json`, or `~/.config/crush/crush.json`):
+
+```json
+{
+  "mcp": {
+    "macos-use": {
+      "type": "stdio",
+      "command": "mcp-server-macos-use"
+    }
+  }
+}
+```
+</details>
+
+<details>
+<summary><b>Any MCP client (generic stdio)</b></summary>
+
+The server communicates over stdio using the MCP JSON-RPC protocol. Point your client to the binary:
+
+```
+command: mcp-server-macos-use
+transport: stdio
+```
+</details>
+
 ## Tools
 
 | Tool | Description |
